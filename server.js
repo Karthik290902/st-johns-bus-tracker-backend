@@ -13,8 +13,8 @@ app.use(cors());
 app.use(express.json());
 
 // SQLite database
-const db = new sqlite3.Database('./bus_data.db');
-
+const Database = require('better-sqlite3');
+const db = new Database('./bus_data.db');
 // Create tables
 db.serialize(() => {
   db.run(`CREATE TABLE IF NOT EXISTS bus_positions (
