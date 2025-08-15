@@ -1,8 +1,8 @@
-// backend/server.js - Fixed field mapping
+// backend/server.js - Fixed to use better-sqlite3 properly
 const express = require('express');
 const cors = require('cors');
 const axios = require('axios');
-const sqlite3 = require('sqlite3/lib/sqlite3').verbose();
+const Database = require('better-sqlite3');
 const path = require('path');
 
 const app = express();
@@ -12,41 +12,39 @@ const PORT = process.env.PORT || 3001;
 app.use(cors());
 app.use(express.json());
 
-// SQLite database
-const Database = require('better-sqlite3');
+// SQLite database using better-sqlite3
 const db = new Database('./bus_data.db');
-// Create tables
-db.serialize(() => {
-  db.run(`CREATE TABLE IF NOT EXISTS bus_positions (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    bus_id TEXT NOT NULL,
-    route_number TEXT NOT NULL,
-    latitude REAL NOT NULL,
-    longitude REAL NOT NULL,
-    heading TEXT,
-    speed REAL,
-    current_location TEXT,
-    deviation TEXT,
-    timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
-  )`);
 
-  db.run(`CREATE TABLE IF NOT EXISTS routes (
-    route_id TEXT PRIMARY KEY,
-    route_short_name TEXT NOT NULL,
-    route_long_name TEXT,
-    route_color TEXT,
-    route_text_color TEXT
-  )`);
+// Create tables - better-sqlite3 syntax
+db.exec(`CREATE TABLE IF NOT EXISTS bus_positions (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  bus_id TEXT NOT NULL,
+  route_number TEXT NOT NULL,
+  latitude REAL NOT NULL,
+  longitude REAL NOT NULL,
+  heading TEXT,
+  speed REAL,
+  current_location TEXT,
+  deviation TEXT,
+  timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
+)`);
 
-  db.run(`CREATE TABLE IF NOT EXISTS stops (
-    stop_id TEXT PRIMARY KEY,
-    stop_code TEXT,
-    stop_name TEXT NOT NULL,
-    stop_lat REAL NOT NULL,
-    stop_lon REAL NOT NULL,
-    wheelchair_boarding INTEGER DEFAULT 0
-  )`);
-});
+db.exec(`CREATE TABLE IF NOT EXISTS routes (
+  route_id TEXT PRIMARY KEY,
+  route_short_name TEXT NOT NULL,
+  route_long_name TEXT,
+  route_color TEXT,
+  route_text_color TEXT
+)`);
+
+db.exec(`CREATE TABLE IF NOT EXISTS stops (
+  stop_id TEXT PRIMARY KEY,
+  stop_code TEXT,
+  stop_name TEXT NOT NULL,
+  stop_lat REAL NOT NULL,
+  stop_lon REAL NOT NULL,
+  wheelchair_boarding INTEGER DEFAULT 0
+)`);
 
 // Cache
 let busDataCache = {
@@ -101,8 +99,8 @@ async function fetchMetrobusData() {
     console.log(`[FETCH] Found ${buses.length} buses in API response`);
     console.log('[FETCH] Sample bus data:', JSON.stringify(buses[0], null, 2));
 
-    // Clear old data (keep last hour for debugging)
-    db.run(`DELETE FROM bus_positions WHERE timestamp < datetime('now', '-10 minutes')`);
+    // Clear old data (keep last hour for debugging) - better-sqlite3 syntax
+    db.prepare(`DELETE FROM bus_positions WHERE timestamp < datetime('now', '-10 minutes')`).run();
 
     const stmt = db.prepare(`INSERT INTO bus_positions 
       (bus_id, route_number, latitude, longitude, heading, speed, current_location, deviation)
@@ -128,15 +126,13 @@ async function fetchMetrobusData() {
       const deviation = bus.deviation || 'On time';
 
       try {
-        stmt.run([busId, route, lat, lng, heading, speed, location, deviation]);
+        stmt.run(busId, route, lat, lng, heading, speed, location, deviation);
         console.log(`[INSERT] ${busId} | Route: ${route} | ${lat}, ${lng} | Speed: ${speed} | ${location}`);
         insertedCount++;
       } catch (err) {
         console.error(`[ERROR] Failed to insert bus ${busId}:`, err.message);
       }
     });
-
-    stmt.finalize();
 
     // Transform data for cache (keep original API format for frontend compatibility)
     const transformedBuses = buses.map(bus => ({
@@ -204,18 +200,11 @@ app.get('/api/buses', async (req, res) => {
   } catch (error) {
     console.error('[ERROR] Main buses endpoint failed:', error);
     
-    // Fallback to database
-    db.all(`SELECT * FROM bus_positions 
-            WHERE timestamp > datetime('now', '-5 minutes')
-            ORDER BY timestamp DESC`, (err, rows) => {
-      if (err) {
-        console.error('[ERROR] Database fallback failed:', err);
-        return res.status(500).json({
-          success: false,
-          error: 'Database error',
-          message: err.message
-        });
-      }
+    // Fallback to database - better-sqlite3 syntax
+    try {
+      const rows = db.prepare(`SELECT * FROM bus_positions 
+              WHERE timestamp > datetime('now', '-5 minutes')
+              ORDER BY timestamp DESC`).all();
 
       console.log(`[FALLBACK] Returning ${rows.length} buses from database`);
       res.json({
@@ -226,7 +215,14 @@ app.get('/api/buses', async (req, res) => {
         count: rows.length,
         message: 'Using recent data from database'
       });
-    });
+    } catch (dbError) {
+      console.error('[ERROR] Database fallback failed:', dbError);
+      return res.status(500).json({
+        success: false,
+        error: 'Database error',
+        message: dbError.message
+      });
+    }
   }
 });
 
@@ -253,23 +249,14 @@ app.get('/api/buses/filtered', async (req, res) => {
 
     query += ` ORDER BY timestamp DESC`;
 
-    db.all(query, params, (err, rows) => {
-      if (err) {
-        console.error('[ERROR] Filtered query failed:', err);
-        return res.status(500).json({
-          success: false,
-          error: 'Query failed',
-          message: err.message
-        });
-      }
+    const rows = db.prepare(query).all(...params);
 
-      console.log(`[FILTER] Found ${rows.length} buses matching filters`);
-      res.json({
-        success: true,
-        data: rows,
-        filters: { routes, busNumber },
-        count: rows.length
-      });
+    console.log(`[FILTER] Found ${rows.length} buses matching filters`);
+    res.json({
+      success: true,
+      data: rows,
+      filters: { routes, busNumber },
+      count: rows.length
     });
 
   } catch (error) {
@@ -283,32 +270,28 @@ app.get('/api/buses/filtered', async (req, res) => {
 });
 
 app.get('/api/routes', (req, res) => {
-  db.all(`SELECT * FROM routes ORDER BY route_short_name`, (err, rows) => {
-    if (err) {
-      return res.status(500).json({
-        success: false,
-        error: 'Routes fetch failed',
-        message: err.message
-      });
-    }
+  try {
+    const rows = db.prepare(`SELECT * FROM routes ORDER BY route_short_name`).all();
     res.json({ success: true, data: rows });
-  });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      error: 'Routes fetch failed',
+      message: error.message
+    });
+  }
 });
 
 app.get('/api/stops', (req, res) => {
-  const { limit } = req.query;
-  let query = `SELECT * FROM stops ORDER BY stop_name`;
-  const params = limit ? [parseInt(limit)] : [];
-
-  if (limit) query += ` LIMIT ?`;
-
-  db.all(query, params, (err, rows) => {
-    if (err) {
-      return res.status(500).json({
-        success: false,
-        error: 'Stops fetch failed',
-        message: err.message
-      });
+  try {
+    const { limit } = req.query;
+    let query = `SELECT * FROM stops ORDER BY stop_name`;
+    
+    let rows;
+    if (limit) {
+      rows = db.prepare(query + ` LIMIT ?`).all(parseInt(limit));
+    } else {
+      rows = db.prepare(query).all();
     }
 
     res.json({
@@ -316,7 +299,13 @@ app.get('/api/stops', (req, res) => {
       data: rows,
       count: rows.length
     });
-  });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      error: 'Stops fetch failed',
+      message: error.message
+    });
+  }
 });
 
 app.get('/api/health', (req, res) => {
@@ -356,23 +345,22 @@ app.get('/api/test-metrobus', async (req, res) => {
 
 // Debug endpoint to check database contents
 app.get('/api/debug/database', (req, res) => {
-  db.all(`SELECT * FROM bus_positions ORDER BY timestamp DESC LIMIT 10`, (err, rows) => {
-    if (err) {
-      return res.status(500).json({
-        success: false,
-        error: err.message
-      });
-    }
-
-    db.get(`SELECT COUNT(*) as total FROM bus_positions`, (err2, count) => {
-      res.json({
-        success: true,
-        recentBuses: rows,
-        totalInDatabase: count ? count.total : 0,
-        message: 'Database contents'
-      });
+  try {
+    const rows = db.prepare(`SELECT * FROM bus_positions ORDER BY timestamp DESC LIMIT 10`).all();
+    const countResult = db.prepare(`SELECT COUNT(*) as total FROM bus_positions`).get();
+    
+    res.json({
+      success: true,
+      recentBuses: rows,
+      totalInDatabase: countResult ? countResult.total : 0,
+      message: 'Database contents'
     });
-  });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      error: error.message
+    });
+  }
 });
 
 // Fetch every 30 seconds
@@ -396,9 +384,7 @@ app.listen(PORT, () => {
 // Graceful shutdown
 process.on('SIGINT', () => {
   console.log('Shutting down server...');
-  db.close((err) => {
-    if (err) console.error('Error closing DB:', err.message);
-    else console.log('Database closed.');
-    process.exit(0);
-  });
+  db.close();
+  console.log('Database closed.');
+  process.exit(0);
 });
