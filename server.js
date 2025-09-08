@@ -149,7 +149,14 @@ async function fetchMetrobusData() {
         deviation: properties.status,
         icon: properties.icon
       };
-    });
+    })
+      .filter(bus => {
+        // ✅ keep only valid buses
+        if (!bus) return false;
+        if (isNaN(bus.lat) || isNaN(bus.lng)) return false;
+        if (Math.abs(bus.lat) > 90 || Math.abs(bus.lng) > 180) return false;
+        return true;
+      });
 
     busDataCache = {
       data: transformedBuses,
