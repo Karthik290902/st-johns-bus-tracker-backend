@@ -54,6 +54,7 @@ let busDataCache = {
 };
 
 // Fetch Metrobus data
+// Fetch Metrobus data (GeoJSON compatible)
 async function fetchMetrobusData() {
   try {
     console.log('[FETCH] Requesting Metrobus API...');
@@ -67,85 +68,82 @@ async function fetchMetrobusData() {
     });
 
     console.log('[FETCH] API Response Status:', response.status);
-    console.log('[FETCH] Response type:', Array.isArray(response.data) ? 'Array' : 'Object');
-    console.log('[FETCH] Response keys/length:', Array.isArray(response.data) ? response.data.length : Object.keys(response.data));
 
-    // Handle both possible response formats
-    let buses;
+    let features;
     if (Array.isArray(response.data)) {
-      // Direct array response
-      buses = response.data;
-      console.log('[FETCH] Using direct array response');
-    } else if (response.data?.Bus && Array.isArray(response.data.Bus)) {
-      // Object with Bus property
-      buses = response.data.Bus;
-      console.log('[FETCH] Using Bus property from response');
+      // Sometimes it's just a raw array of features
+      features = response.data;
+    } else if (Array.isArray(response.data.features)) {
+      // Standard GeoJSON FeatureCollection
+      features = response.data.features;
     } else {
-      console.error('[FETCH] Unexpected response format. Type:', typeof response.data);
-      console.error('[FETCH] Sample data:', JSON.stringify(response.data).substring(0, 500));
+      console.error('[FETCH] Unexpected GeoJSON structure');
       return [];
     }
 
-    if (!Array.isArray(buses)) {
-      console.error('[FETCH] Buses is not an array:', typeof buses);
-      return [];
-    }
-
-    if (buses.length === 0) {
+    if (features.length === 0) {
       console.log('[FETCH] No active buses returned');
       return [];
     }
 
-    console.log(`[FETCH] Found ${buses.length} buses in API response`);
-    console.log('[FETCH] Sample bus data:', JSON.stringify(buses[0], null, 2));
+    console.log(`[FETCH] Found ${features.length} buses in API response`);
+    console.log('[FETCH] Sample bus feature:', JSON.stringify(features[0], null, 2));
 
-    // Clear old data (keep last hour for debugging) - better-sqlite3 syntax
+    // Clear out old data (older than 10 minutes)
     db.prepare(`DELETE FROM bus_positions WHERE timestamp < datetime('now', '-10 minutes')`).run();
 
-    const stmt = db.prepare(`INSERT INTO bus_positions 
+    const stmt = db.prepare(`
+      INSERT INTO bus_positions 
       (bus_id, route_number, latitude, longitude, heading, speed, current_location, deviation)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?)`);
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    `);
 
     let insertedCount = 0;
-    buses.forEach(bus => {
-      // Use correct field names from your API response
-      const lat = parseFloat(bus.bus_lat);
-      const lng = parseFloat(bus.bus_lon);
-      
-      // Skip buses without valid coordinates
+
+    features.forEach(feature => {
+      if (!feature.geometry || !feature.properties) return;
+
+      const { geometry, properties } = feature;
+      const [lng, lat] = geometry.coordinates;
+
       if (isNaN(lat) || isNaN(lng)) {
-        console.log(`[SKIP] Bus ${bus.vehicle} - invalid coordinates: lat=${bus.bus_lat}, lng=${bus.bus_lon}`);
+        console.log(`[SKIP] Invalid coordinates for bus ${properties.id}`);
         return;
       }
 
-      const busId = bus.vehicle || `bus_${Date.now()}`;
-      const route = bus.routenumber || bus.current_route || 'Unknown';
-      const heading = bus.heading || 'Unknown';
-      const speed = parseFloat(bus.speed) || 0;
-      const location = bus.current_location || 'Unknown';
-      const deviation = bus.deviation || 'On time';
+      const busId = properties.unit || properties.id || `bus_${Date.now()}`;
+      const route = properties.name || 'Unknown';
+      const heading = properties.direction || 0;
+      const speed = parseFloat(properties.speed) || 0;
+      const location = properties.location || 'Unknown';
+      const deviation = properties.status || 'On time';
 
       try {
         stmt.run(busId, route, lat, lng, heading, speed, location, deviation);
-        console.log(`[INSERT] ${busId} | Route: ${route} | ${lat}, ${lng} | Speed: ${speed} | ${location}`);
         insertedCount++;
       } catch (err) {
         console.error(`[ERROR] Failed to insert bus ${busId}:`, err.message);
       }
     });
 
-    // Transform data for cache (keep original API format for frontend compatibility)
-    const transformedBuses = buses.map(bus => ({
-      // Keep original fields
-      ...bus,
-      // Add standardized fields for frontend
-      veh: bus.vehicle,
-      route: bus.routenumber,
-      lat: parseFloat(bus.bus_lat),
-      lng: parseFloat(bus.bus_lon),
-      hdg: bus.heading,
-      spd: parseFloat(bus.speed) || 0
-    }));
+    // Transform for cache (simplified structure for frontend)
+    const transformedBuses = features.map(feature => {
+      const { geometry, properties } = feature;
+      const [lng, lat] = geometry.coordinates;
+
+      return {
+        id: properties.id,
+        busId: properties.unit || properties.id,
+        route: properties.name,
+        lat,
+        lng,
+        hdg: properties.direction,
+        spd: parseFloat(properties.speed) || 0,
+        location: properties.location,
+        deviation: properties.status,
+        icon: properties.icon
+      };
+    });
 
     busDataCache = {
       data: transformedBuses,
@@ -153,12 +151,11 @@ async function fetchMetrobusData() {
       cacheExpiry: 30000
     };
 
-    console.log(`[FETCH] Successfully stored ${insertedCount}/${buses.length} buses at ${busDataCache.lastUpdated.toISOString()}`);
+    console.log(`[FETCH] Successfully stored ${insertedCount}/${features.length} buses at ${busDataCache.lastUpdated.toISOString()}`);
     return transformedBuses;
 
   } catch (error) {
-    console.error('[ERROR] Failed to fetch data:', error.message);
-    console.error('[ERROR] Full error:', error);
+    console.error('[ERROR] Failed to fetch Metrobus data:', error.message);
 
     if (busDataCache.data) {
       console.log('[CACHE] Returning stale cached data');
@@ -168,6 +165,7 @@ async function fetchMetrobusData() {
     throw error;
   }
 }
+
 
 // Routes
 
