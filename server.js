@@ -131,10 +131,16 @@ async function fetchMetrobusData() {
       const { geometry, properties } = feature;
       const [lng, lat] = geometry.coordinates;
 
+      // Extract route prefix (first number group before the dash)
+      let rawRoute = properties.name || '';
+      let routeNumber = rawRoute.split('-')[0]; // e.g. "09" from "09-1"
+      routeNumber = parseInt(routeNumber, 10);  // -> 9 (no leading zeros)
+
+
       return {
         id: properties.id,
         busId: properties.unit || properties.id,
-        route: properties.name,
+        route: routeNumber, // ✅ cleaned number
         lat,
         lng,
         hdg: properties.direction,
