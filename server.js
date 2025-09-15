@@ -54,7 +54,6 @@ let busDataCache = {
 };
 
 // Fetch Metrobus data
-// Fetch Metrobus data (GeoJSON compatible)
 async function fetchMetrobusData() {
   try {
     console.log('[FETCH] Requesting Metrobus API...');
@@ -69,25 +68,19 @@ async function fetchMetrobusData() {
 
     console.log('[FETCH] API Response Status:', response.status);
 
-    let features;
-    if (Array.isArray(response.data)) {
-      // Sometimes it's just a raw array of features
-      features = response.data;
-    } else if (Array.isArray(response.data.features)) {
-      // Standard GeoJSON FeatureCollection
-      features = response.data.features;
-    } else {
-      console.error('[FETCH] Unexpected GeoJSON structure');
+    if (!Array.isArray(response.data)) {
+      console.error('[FETCH] Unexpected API format:', typeof response.data);
       return [];
     }
 
-    if (features.length === 0) {
+    const buses = response.data;
+    if (buses.length === 0) {
       console.log('[FETCH] No active buses returned');
       return [];
     }
 
-    console.log(`[FETCH] Found ${features.length} buses in API response`);
-    console.log('[FETCH] Sample bus feature:', JSON.stringify(features[0], null, 2));
+    console.log(`[FETCH] Found ${buses.length} buses in API response`);
+    console.log('[FETCH] Sample bus:', JSON.stringify(buses[0], null, 2));
 
     // Clear out old data (older than 10 minutes)
     db.prepare(`DELETE FROM bus_positions WHERE timestamp < datetime('now', '-10 minutes')`).run();
@@ -100,63 +93,47 @@ async function fetchMetrobusData() {
 
     let insertedCount = 0;
 
-    features.forEach(feature => {
-      if (!feature.geometry || !feature.properties) return;
-
-      const { geometry, properties } = feature;
-      const [lng, lat] = geometry.coordinates;
+    buses.forEach(bus => {
+      const lat = parseFloat(bus.bus_lat);
+      const lng = parseFloat(bus.bus_lon);
 
       if (isNaN(lat) || isNaN(lng)) {
-        console.log(`[SKIP] Invalid coordinates for bus ${properties.id}`);
+        console.log(`[SKIP] Invalid coordinates for bus ${bus.routerun}`);
         return;
       }
 
-      const busId = properties.unit || properties.id || `bus_${Date.now()}`;
-      const route = properties.name || 'Unknown';
-      const heading = properties.direction || 0;
-      const speed = parseFloat(properties.speed) || 0;
-      const location = properties.location || 'Unknown';
-      const deviation = properties.status || 'On time';
-
       try {
-        stmt.run(busId, route, lat, lng, heading, speed, location, deviation);
+        stmt.run(
+          bus.routerun,                  // bus_id
+          bus.routenumber,               // route_number
+          lat, lng,
+          bus.heading || null,           // heading
+          parseFloat(bus.speed) || 0,    // speed
+          bus.current_location || 'Unknown',
+          bus.deviation || 'On time'
+        );
         insertedCount++;
       } catch (err) {
-        console.error(`[ERROR] Failed to insert bus ${busId}:`, err.message);
+        console.error(`[ERROR] Failed to insert bus ${bus.routerun}:`, err.message);
       }
     });
 
-    // Transform for cache (simplified structure for frontend)
-    const transformedBuses = features.map(feature => {
-      const { geometry, properties } = feature;
-      const [lng, lat] = geometry.coordinates;
-
-      // Extract route prefix (first number group before the dash)
-      let rawRoute = properties.name || '';
-      let routeNumber = rawRoute.split('-')[0]; // e.g. "09" from "09-1"
-      routeNumber = parseInt(routeNumber, 10);  // -> 9 (no leading zeros)
-
-
-      return {
-        id: properties.id,
-        busId: properties.unit || properties.id,
-        route: routeNumber, // ✅ cleaned number
-        lat,
-        lng,
-        hdg: properties.direction,
-        spd: parseFloat(properties.speed) || 0,
-        location: properties.location,
-        deviation: properties.status,
-        icon: properties.icon
-      };
-    })
-      .filter(bus => {
-        // ✅ keep only valid buses
-        if (!bus) return false;
-        if (isNaN(bus.lat) || isNaN(bus.lng)) return false;
-        if (Math.abs(bus.lat) > 90 || Math.abs(bus.lng) > 180) return false;
-        return true;
-      });
+    // Transform for cache (frontend-friendly)
+    const transformedBuses = buses.map(bus => ({
+      id: bus.routerun,
+      busId: bus.routerun,
+      route: bus.routenumber,
+      lat: parseFloat(bus.bus_lat),
+      lng: parseFloat(bus.bus_lon),
+      hdg: bus.heading,
+      spd: parseFloat(bus.speed) || 0,
+      location: bus.current_location,
+      deviation: bus.deviation,
+      icon: bus.icon
+    })).filter(bus => (
+      !isNaN(bus.lat) && !isNaN(bus.lng) &&
+      Math.abs(bus.lat) <= 90 && Math.abs(bus.lng) <= 180
+    ));
 
     busDataCache = {
       data: transformedBuses,
@@ -164,7 +141,7 @@ async function fetchMetrobusData() {
       cacheExpiry: 30000
     };
 
-    console.log(`[FETCH] Successfully stored ${insertedCount}/${features.length} buses at ${busDataCache.lastUpdated.toISOString()}`);
+    console.log(`[FETCH] Successfully stored ${insertedCount}/${buses.length} buses at ${busDataCache.lastUpdated.toISOString()}`);
     return transformedBuses;
 
   } catch (error) {
