@@ -1,4 +1,4 @@
-// backend/server.js - Fixed to use better-sqlite3 properly
+// backend/server.js - Fixed to use better-sqlite3 properly and updated API mapping
 const express = require('express');
 const cors = require('cors');
 const axios = require('axios');
@@ -80,7 +80,7 @@ async function fetchMetrobusData() {
     }
 
     console.log(`[FETCH] Found ${buses.length} buses in API response`);
-    console.log('[FETCH] Sample bus:', JSON.stringify(buses[0], null, 2));
+    console.log('[FETCH] Sample bus fields:', Object.keys(buses[0]));
 
     // Clear out old data (older than 10 minutes)
     db.prepare(`DELETE FROM bus_positions WHERE timestamp < datetime('now', '-10 minutes')`).run();
@@ -94,23 +94,24 @@ async function fetchMetrobusData() {
     let insertedCount = 0;
 
     buses.forEach(bus => {
+      // Use the correct field names from the API
       const lat = parseFloat(bus.bus_lat);
       const lng = parseFloat(bus.bus_lon);
 
       if (isNaN(lat) || isNaN(lng)) {
-        console.log(`[SKIP] Invalid coordinates for bus ${bus.routerun}`);
+        console.log(`[SKIP] Invalid coordinates for bus ${bus.routerun}: lat=${bus.bus_lat}, lng=${bus.bus_lon}`);
         return;
       }
 
       try {
         stmt.run(
-          bus.routerun,                  // bus_id
-          bus.routenumber,               // route_number
+          bus.routerun,                  // bus_id (e.g., "Rt 1-1")
+          bus.routenumber,               // route_number (e.g., 1)
           lat, lng,
-          bus.heading || null,           // heading
+          bus.heading || null,           // heading (e.g., "NE")
           parseFloat(bus.speed) || 0,    // speed
           bus.current_location || 'Unknown',
-          bus.deviation || 'On time'
+          bus.deviation || 'Unknown'     // deviation (e.g., "3 MINS BEHIND")
         );
         insertedCount++;
       } catch (err) {
@@ -120,19 +121,27 @@ async function fetchMetrobusData() {
 
     // Transform for cache (frontend-friendly)
     const transformedBuses = buses.map(bus => ({
-      id: bus.routerun,
-      busId: bus.routerun,
-      route: bus.routenumber,
+      id: bus.routerun,                 // "Rt 1-1"
+      busId: bus.routerun,              // "Rt 1-1"
+      route: bus.routenumber,           // 1
+      routeShort: bus.routerunshort,    // "1-1"
       lat: parseFloat(bus.bus_lat),
       lng: parseFloat(bus.bus_lon),
-      hdg: bus.heading,
+      hdg: bus.heading,                 // "NE"
       spd: parseFloat(bus.speed) || 0,
-      location: bus.current_location,
-      deviation: bus.deviation,
-      icon: bus.icon
+      location: bus.current_location,   // "MUN Centre"
+      deviation: bus.deviation,         // "3 MINS BEHIND"
+      icon: bus.icon,                   // "busiconNE.png"
+      vehicle: bus.vehicle,             // "2446"
+      timeStamp: bus.time_stamp,        // "10:34 AM"
+      headsign: bus.gtfs_trip_headsign, // "Crosbie Rd - Institutes"
+      color: bus.colour,                // "#99FFCC"
+      wifi: bus.wifi,                   // "Y" or null
+      service: bus.service              // "5"
     })).filter(bus => (
       !isNaN(bus.lat) && !isNaN(bus.lng) &&
-      Math.abs(bus.lat) <= 90 && Math.abs(bus.lng) <= 180
+      Math.abs(bus.lat) <= 90 && Math.abs(bus.lng) <= 180 &&
+      bus.lat > 0 && bus.lng < 0  // Basic validation for Newfoundland coordinates
     ));
 
     busDataCache = {
@@ -142,6 +151,8 @@ async function fetchMetrobusData() {
     };
 
     console.log(`[FETCH] Successfully stored ${insertedCount}/${buses.length} buses at ${busDataCache.lastUpdated.toISOString()}`);
+    console.log(`[FETCH] Transformed ${transformedBuses.length} buses for frontend`);
+    
     return transformedBuses;
 
   } catch (error) {
@@ -155,7 +166,6 @@ async function fetchMetrobusData() {
     throw error;
   }
 }
-
 
 // Routes
 
@@ -351,6 +361,39 @@ app.get('/api/debug/database', (req, res) => {
   }
 });
 
+// New debug endpoint to see raw API response
+app.get('/api/debug/raw-api', async (req, res) => {
+  try {
+    console.log('[DEBUG] Fetching raw API response...');
+    const response = await axios.get('https://www.metrobus.co.ca/api/timetrack/json/', {
+      timeout: 10000,
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (compatible; BusTracker/1.0)',
+        'Referer': 'https://www.metrobusmobile.com/',
+        'Accept': 'application/json'
+      }
+    });
+
+    res.json({
+      success: true,
+      status: response.status,
+      dataType: typeof response.data,
+      isArray: Array.isArray(response.data),
+      count: Array.isArray(response.data) ? response.data.length : 0,
+      firstBus: Array.isArray(response.data) && response.data.length > 0 ? response.data[0] : null,
+      sampleFields: Array.isArray(response.data) && response.data.length > 0 ? Object.keys(response.data[0]) : [],
+      message: 'Raw API response'
+    });
+
+  } catch (error) {
+    res.json({
+      success: false,
+      error: error.message,
+      message: 'Failed to fetch raw API data'
+    });
+  }
+});
+
 // Fetch every 30 seconds
 const startPeriodicFetch = () => {
   console.log('Starting periodic bus data fetching...');
@@ -366,6 +409,7 @@ app.listen(PORT, () => {
   console.log(`Health check: http://localhost:${PORT}/api/health`);
   console.log(`Test Metrobus API: http://localhost:${PORT}/api/test-metrobus`);
   console.log(`Debug database: http://localhost:${PORT}/api/debug/database`);
+  console.log(`Debug raw API: http://localhost:${PORT}/api/debug/raw-api`);
   startPeriodicFetch();
 });
 
