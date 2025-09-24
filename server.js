@@ -1,4 +1,4 @@
-// backend/server.js - Fixed to use better-sqlite3 properly and updated API mapping
+// backend/server.js - Fixed to use better-sqlite3 properly
 const express = require('express');
 const cors = require('cors');
 const axios = require('axios');
@@ -67,82 +67,85 @@ async function fetchMetrobusData() {
     });
 
     console.log('[FETCH] API Response Status:', response.status);
+    console.log('[FETCH] Response type:', Array.isArray(response.data) ? 'Array' : 'Object');
+    console.log('[FETCH] Response keys/length:', Array.isArray(response.data) ? response.data.length : Object.keys(response.data));
 
-    if (!Array.isArray(response.data)) {
-      console.error('[FETCH] Unexpected API format:', typeof response.data);
+    // Handle both possible response formats
+    let buses;
+    if (Array.isArray(response.data)) {
+      // Direct array response
+      buses = response.data;
+      console.log('[FETCH] Using direct array response');
+    } else if (response.data?.Bus && Array.isArray(response.data.Bus)) {
+      // Object with Bus property
+      buses = response.data.Bus;
+      console.log('[FETCH] Using Bus property from response');
+    } else {
+      console.error('[FETCH] Unexpected response format. Type:', typeof response.data);
+      console.error('[FETCH] Sample data:', JSON.stringify(response.data).substring(0, 500));
       return [];
     }
 
-    const buses = response.data;
+    if (!Array.isArray(buses)) {
+      console.error('[FETCH] Buses is not an array:', typeof buses);
+      return [];
+    }
+
     if (buses.length === 0) {
       console.log('[FETCH] No active buses returned');
       return [];
     }
 
     console.log(`[FETCH] Found ${buses.length} buses in API response`);
-    console.log('[FETCH] Sample bus fields:', Object.keys(buses[0]));
+    console.log('[FETCH] Sample bus data:', JSON.stringify(buses[0], null, 2));
 
-    // Clear out old data (older than 10 minutes)
+    // Clear old data (keep last hour for debugging) - better-sqlite3 syntax
     db.prepare(`DELETE FROM bus_positions WHERE timestamp < datetime('now', '-10 minutes')`).run();
 
-    const stmt = db.prepare(`
-      INSERT INTO bus_positions 
+    const stmt = db.prepare(`INSERT INTO bus_positions 
       (bus_id, route_number, latitude, longitude, heading, speed, current_location, deviation)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-    `);
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)`);
 
     let insertedCount = 0;
-
     buses.forEach(bus => {
-      // Use the correct field names from the API
+      // Use correct field names from your API response
       const lat = parseFloat(bus.bus_lat);
       const lng = parseFloat(bus.bus_lon);
-
+      
+      // Skip buses without valid coordinates
       if (isNaN(lat) || isNaN(lng)) {
-        console.log(`[SKIP] Invalid coordinates for bus ${bus.routerun}: lat=${bus.bus_lat}, lng=${bus.bus_lon}`);
+        console.log(`[SKIP] Bus ${bus.vehicle} - invalid coordinates: lat=${bus.bus_lat}, lng=${bus.bus_lon}`);
         return;
       }
 
+      const busId = bus.vehicle || `bus_${Date.now()}`;
+      const route = bus.routenumber || bus.current_route || 'Unknown';
+      const heading = bus.heading || 'Unknown';
+      const speed = parseFloat(bus.speed) || 0;
+      const location = bus.current_location || 'Unknown';
+      const deviation = bus.deviation || 'On time';
+
       try {
-        stmt.run(
-          bus.routerun,                  // bus_id (e.g., "Rt 1-1")
-          bus.routenumber,               // route_number (e.g., 1)
-          lat, lng,
-          bus.heading || null,           // heading (e.g., "NE")
-          parseFloat(bus.speed) || 0,    // speed
-          bus.current_location || 'Unknown',
-          bus.deviation || 'Unknown'     // deviation (e.g., "3 MINS BEHIND")
-        );
+        stmt.run(busId, route, lat, lng, heading, speed, location, deviation);
+        console.log(`[INSERT] ${busId} | Route: ${route} | ${lat}, ${lng} | Speed: ${speed} | ${location}`);
         insertedCount++;
       } catch (err) {
-        console.error(`[ERROR] Failed to insert bus ${bus.routerun}:`, err.message);
+        console.error(`[ERROR] Failed to insert bus ${busId}:`, err.message);
       }
     });
 
-    // Transform for cache (frontend-friendly)
+    // Transform data for cache (keep original API format for frontend compatibility)
     const transformedBuses = buses.map(bus => ({
-      id: bus.routerun,                 // "Rt 1-1"
-      busId: bus.routerun,              // "Rt 1-1"
-      route: bus.routenumber,           // 1
-      routeShort: bus.routerunshort,    // "1-1"
+      // Keep original fields
+      ...bus,
+      // Add standardized fields for frontend
+      veh: bus.vehicle,
+      route: bus.routenumber,
       lat: parseFloat(bus.bus_lat),
       lng: parseFloat(bus.bus_lon),
-      hdg: bus.heading,                 // "NE"
-      spd: parseFloat(bus.speed) || 0,
-      location: bus.current_location,   // "MUN Centre"
-      deviation: bus.deviation,         // "3 MINS BEHIND"
-      icon: bus.icon,                   // "busiconNE.png"
-      vehicle: bus.vehicle,             // "2446"
-      timeStamp: bus.time_stamp,        // "10:34 AM"
-      headsign: bus.gtfs_trip_headsign, // "Crosbie Rd - Institutes"
-      color: bus.colour,                // "#99FFCC"
-      wifi: bus.wifi,                   // "Y" or null
-      service: bus.service              // "5"
-    })).filter(bus => (
-      !isNaN(bus.lat) && !isNaN(bus.lng) &&
-      Math.abs(bus.lat) <= 90 && Math.abs(bus.lng) <= 180 &&
-      bus.lat > 0 && bus.lng < 0  // Basic validation for Newfoundland coordinates
-    ));
+      hdg: bus.heading,
+      spd: parseFloat(bus.speed) || 0
+    }));
 
     busDataCache = {
       data: transformedBuses,
@@ -151,12 +154,11 @@ async function fetchMetrobusData() {
     };
 
     console.log(`[FETCH] Successfully stored ${insertedCount}/${buses.length} buses at ${busDataCache.lastUpdated.toISOString()}`);
-    console.log(`[FETCH] Transformed ${transformedBuses.length} buses for frontend`);
-    
     return transformedBuses;
 
   } catch (error) {
-    console.error('[ERROR] Failed to fetch Metrobus data:', error.message);
+    console.error('[ERROR] Failed to fetch data:', error.message);
+    console.error('[ERROR] Full error:', error);
 
     if (busDataCache.data) {
       console.log('[CACHE] Returning stale cached data');
@@ -361,39 +363,6 @@ app.get('/api/debug/database', (req, res) => {
   }
 });
 
-// New debug endpoint to see raw API response
-app.get('/api/debug/raw-api', async (req, res) => {
-  try {
-    console.log('[DEBUG] Fetching raw API response...');
-    const response = await axios.get('https://www.metrobus.co.ca/api/timetrack/json/', {
-      timeout: 10000,
-      headers: {
-        'User-Agent': 'Mozilla/5.0 (compatible; BusTracker/1.0)',
-        'Referer': 'https://www.metrobusmobile.com/',
-        'Accept': 'application/json'
-      }
-    });
-
-    res.json({
-      success: true,
-      status: response.status,
-      dataType: typeof response.data,
-      isArray: Array.isArray(response.data),
-      count: Array.isArray(response.data) ? response.data.length : 0,
-      firstBus: Array.isArray(response.data) && response.data.length > 0 ? response.data[0] : null,
-      sampleFields: Array.isArray(response.data) && response.data.length > 0 ? Object.keys(response.data[0]) : [],
-      message: 'Raw API response'
-    });
-
-  } catch (error) {
-    res.json({
-      success: false,
-      error: error.message,
-      message: 'Failed to fetch raw API data'
-    });
-  }
-});
-
 // Fetch every 30 seconds
 const startPeriodicFetch = () => {
   console.log('Starting periodic bus data fetching...');
@@ -409,7 +378,6 @@ app.listen(PORT, () => {
   console.log(`Health check: http://localhost:${PORT}/api/health`);
   console.log(`Test Metrobus API: http://localhost:${PORT}/api/test-metrobus`);
   console.log(`Debug database: http://localhost:${PORT}/api/debug/database`);
-  console.log(`Debug raw API: http://localhost:${PORT}/api/debug/raw-api`);
   startPeriodicFetch();
 });
 
