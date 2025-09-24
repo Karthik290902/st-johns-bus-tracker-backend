@@ -1,4 +1,4 @@
-// backend/server.js - Rewritten to return a flat list of bus dictionaries
+// backend/server.js - Rewritten to return a flat list of bus dictionaries (with route simplified)
 const express = require('express');
 const cors = require('cors');
 const axios = require('axios');
@@ -8,15 +8,11 @@ const path = require('path');
 const app = express();
 const PORT = process.env.PORT || 3001;
 
-// Middleware
 app.use(cors());
 app.use(express.json());
 
-// SQLite database using better-sqlite3
 const db = new Database('./bus_data.db');
 
-// Create tables
-// (keeping schema the same — you might extend later if needed)
 db.exec(`CREATE TABLE IF NOT EXISTS bus_positions (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   bus_id TEXT NOT NULL,
@@ -47,7 +43,6 @@ db.exec(`CREATE TABLE IF NOT EXISTS stops (
   wheelchair_boarding INTEGER DEFAULT 0
 )`);
 
-// Cache
 let busDataCache = {
   data: null,
   lastUpdated: null,
@@ -83,7 +78,6 @@ async function fetchMetrobusData() {
 
     console.log(`[FETCH] Found ${buses.length} buses`);
 
-    // Clear old data
     db.prepare(`DELETE FROM bus_positions WHERE timestamp < datetime('now', '-10 minutes')`).run();
 
     const stmt = db.prepare(`INSERT INTO bus_positions 
@@ -97,12 +91,15 @@ async function fetchMetrobusData() {
         lat = parseFloat(bus.geometry.coordinates[1]);
       }
 
-      // Insert into DB (skip null coords)
+      // Simplify route number (remove - and following)
+      let routeRaw = bus.properties?.name || '';
+      let routeNumber = routeRaw.split('-')[0];
+
       try {
         if (lat !== null && lng !== null) {
           stmt.run(
             bus.properties?.id || 'unknown',
-            bus.properties?.name || 'unknown',
+            routeNumber,
             lat,
             lng,
             bus.properties?.direction || 'Unknown',
@@ -117,7 +114,7 @@ async function fetchMetrobusData() {
 
       return {
         id: bus.properties?.id || null,
-        route: bus.properties?.name || null,
+        route: routeNumber,
         unit: bus.properties?.unit || null,
         lat,
         lng,
@@ -151,7 +148,6 @@ async function fetchMetrobusData() {
   }
 }
 
-// === API Routes ===
 app.get('/api/buses', async (req, res) => {
   try {
     const now = new Date();
@@ -238,7 +234,6 @@ app.get('/api/health', (req, res) => {
   });
 });
 
-// Debug endpoints
 app.get('/api/test-metrobus', async (req, res) => {
   try {
     const data = await fetchMetrobusData();
@@ -258,7 +253,6 @@ app.get('/api/debug/database', (req, res) => {
   }
 });
 
-// Start periodic fetch
 const startPeriodicFetch = () => {
   console.log('Starting periodic bus data fetching...');
   fetchMetrobusData().catch(console.error);
