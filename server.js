@@ -57,7 +57,7 @@ let busDataCache = {
 async function fetchMetrobusData() {
   try {
     console.log('[FETCH] Requesting Metrobus API...');
-    const response = await axios.get('https://www.metrobus.co.ca/api/timetrack/json/', {
+    const response = await axios.get('https://www.metrobus.com/avl/GEOjson/', {
       timeout: 10000,
       headers: {
         'User-Agent': 'Mozilla/5.0 (compatible; BusTracker/1.0)',
